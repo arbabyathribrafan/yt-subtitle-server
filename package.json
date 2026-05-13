@@ -10,6 +10,7 @@
     "cors": "*",
     "express": "*",
     "google-translate-api-x": "*",
+    "youtube-captions-scraper": "*",
     "youtube-transcript": "*"
   }
 }
