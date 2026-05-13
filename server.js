@@ -4,7 +4,7 @@ const { getSubtitles } = require('youtube-captions-scraper');
 const translate = require('google-translate-api-x');
 
 const app = express();
-app.use(cors()); // যেকোনো ওয়েবসাইট থেকে রিকোয়েস্ট অ্যালাও করার জন্য
+app.use(cors());
 
 // ১. সাবটাইটেল বের করা এবং বাংলা করার API
 app.get('/api/transcript', async (req, res) => {
@@ -21,30 +21,45 @@ app.get('/api/transcript', async (req, res) => {
             lang: 'en' 
         });
 
-        // ফ্রি সার্ভার যেন ওভারলোড না হয়, তাই প্রথম ৫০টি লাইন ট্রান্সলেট করছি 
-        // (আপনি চাইলে limit তুলে দিতে পারেন, তবে একটু সময় বেশি লাগবে)
+        // প্রথম ৫০টি লাইন নিচ্ছি
         const limit = Math.min(subtitles.length, 50);
         let processedData = [];
+        let englishLines = [];
 
+        // ইংরেজি লাইনগুলো একসাথে করা
         for (let i = 0; i < limit; i++) {
-            let line = subtitles[i];
-            let enText = line.text.replace(/\n/g, ' '); // লাইন ব্রেক সরানো
-            
-            // গুগল ট্রান্সলেটর দিয়ে বাংলা করা
-            let translated = await translate(enText, { to: 'bn' });
+            let enText = subtitles[i].text.replace(/\n/g, ' ').trim();
+            englishLines.push(enText || "...");
+        }
 
+        // গুগলকে মাত্র ১টি রিকোয়েস্ট পাঠিয়ে সব বাংলা করা (Rate limit থেকে বাঁচতে)
+        let combinedText = englishLines.join('\n');
+        let translatedText = "";
+        
+        try {
+            let translated = await translate(combinedText, { to: 'bn' });
+            translatedText = translated.text;
+        } catch (tError) {
+            console.log("Translation Blocked by Google, using English fallback.");
+            translatedText = combinedText; // ট্রান্সলেট ফেইল করলে শুধু ইংরেজি দেখাবে
+        }
+
+        let bengaliLines = translatedText.split('\n');
+
+        // ইংরেজি ও বাংলা লাইন একসাথে সাজানো
+        for (let i = 0; i < limit; i++) {
             processedData.push({
-                start: parseFloat(line.start),
-                end: parseFloat(line.start) + parseFloat(line.dur),
-                en: enText,
-                bn: translated.text
+                start: parseFloat(subtitles[i].start),
+                end: parseFloat(subtitles[i].start) + parseFloat(subtitles[i].dur),
+                en: englishLines[i],
+                bn: bengaliLines[i] ? bengaliLines[i].trim() : "অনুবাদ করা যায়নি"
             });
         }
 
         res.json(processedData);
 
     } catch (error) {
-        res.status(500).json({ error: "এই ভিডিওতে কোনো ইংরেজি সাবটাইটেল নেই বা ট্রান্সলেট করা যায়নি।" });
+        res.status(500).json({ error: "এই ভিডিওতে কোনো ইংরেজি সাবটাইটেল নেই বা অটো-জেনারেটেড।" });
     }
 });
 
