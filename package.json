@@ -1,16 +1,16 @@
 {
-  "name": "yt-subtitle-backend",
+  "name": "yt-subtitle-server",
   "version": "1.0.0",
-  "description": "YouTube Subtitle Fetcher and Translator",
+  "description": "YouTube Subtitle Fetcher API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "cors": "*",
-    "express": "*",
-    "google-translate-api-x": "*",
-    "youtube-captions-scraper": "*",
-    "youtube-transcript": "*"
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
