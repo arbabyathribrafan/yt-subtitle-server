@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { YoutubeTranscript } = require('youtube-transcript');
 
 const app = express();
 
@@ -15,63 +16,45 @@ app.get('/transcript', async (req, res) => {
     }
 
     try {
-        const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        // ইউটিউব পেজ ফেচ করা
-        const response = await fetch(ytUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-        });
-        const html = await response.text();
-
-        // HTML থেকে হিডেন ক্যাপশন ট্র্যাক বের করা
-        const regex = /"captionTracks":\[(.*?)\]/;
-        const match = regex.exec(html);
-        if (!match) {
-            return res.status(404).json({ error: 'No captions found for this video' });
-        }
-
-        const tracks = JSON.parse(`[${match[1]}]`);
+        console.log(`Fetching transcript for video: ${videoId}`);
         
-        // ইংরেজি সাবটাইটেল খোঁজা
-        const enTrack = tracks.find(t => t.languageCode === 'en' || t.vssId.includes('.en')) || tracks[0];
-
-        if (!enTrack) {
-            return res.status(404).json({ error: 'No valid track found' });
+        // youtube-transcript প্যাকেজ ব্যবহার করে সাবটাইটেল ফেচ করা
+        const transcriptList = await YoutubeTranscript.fetchTranscript(videoId);
+        
+        if (!transcriptList || transcriptList.length === 0) {
+            return res.status(404).json({ error: 'No captions found' });
         }
 
-        // XML ফরম্যাটে সাবটাইটেল ডাউনলোড
-        const xmlResponse = await fetch(enTrack.baseUrl);
-        const xmlText = await xmlResponse.text();
-
-        const transcript = [];
-        // XML পার্স করার জন্য Regex
-        const textRegex = /<text start="([^"]*)"(?: dur="([^"]*)")?[^>]*>(.*?)<\/text>/g;
-        let textMatch;
-
-        while ((textMatch = textRegex.exec(xmlText)) !== null) {
-            const start = parseFloat(textMatch[1]);
-            const dur = textMatch[2] ? parseFloat(textMatch[2]) : 2.0;
-            let text = textMatch[3];
+        // ফ্রন্টএন্ড এর কাঙ্ক্ষিত ফরম্যাটে ডেটা সাজানো
+        const formattedTranscript = transcriptList.map(item => {
+            // offset এবং duration মিলিসেকেন্ডে থাকে, তাই সেকেন্ডে কনভার্ট করা হলো
+            const startSec = item.offset / 1000;
+            const durSec = item.duration / 1000;
             
-            // HTML Entity ডিকোড করা
-            text = text.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\n/g, ' ').replace(/<[^>]*>?/gm, '').trim();
-            
-            if (text) {
-                transcript.push({
-                    start,
-                    end: start + dur,
-                    en: text
-                });
-            }
-        }
+            // স্পেশাল ক্যারেক্টার ক্লিন করা
+            let text = item.text
+                .replace(/&amp;/g, '&')
+                .replace(/&#39;/g, "'")
+                .replace(/&quot;/g, '"')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/\n/g, ' ')
+                .replace(/<[^>]*>?/gm, '')
+                .trim();
+
+            return {
+                start: startSec,
+                end: startSec + durSec,
+                en: text
+            };
+        });
 
         // সফল হলে JSON রেসপন্স পাঠানো
-        res.json(transcript);
+        res.json(formattedTranscript);
 
     } catch (error) {
-        console.error('Error fetching transcript:', error);
-        res.status(500).json({ error: 'Failed to fetch transcript from YouTube' });
+        console.error('Error fetching transcript:', error.message);
+        res.status(500).json({ error: 'Failed to fetch transcript from YouTube. It might not have captions.' });
     }
 });
 
