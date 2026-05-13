@@ -1,90 +1,82 @@
 const express = require('express');
 const cors = require('cors');
-const { YoutubeTranscript } = require('youtube-transcript');
-const { getSubtitles } = require('youtube-captions-scraper');
-const translate = require('google-translate-api-x');
 
 const app = express();
+
+// সব ওয়েবসাইটের জন্য CORS পারমিশন দেওয়া হলো
 app.use(cors());
 
-// সাবটাইটেল বের করা এবং বাংলা করার API
-app.get('/api/transcript', async (req, res) => {
+// সাবটাইটেল বের করার API Endpoint
+app.get('/transcript', async (req, res) => {
     const videoId = req.query.videoId;
-    if (!videoId) return res.status(400).json({ error: "Video ID is required" });
-
-    let rawSubtitles = [];
-
-    // সিস্টেম ১: প্রথমে অটো-জেনারেটেড ট্রাই করবে
-    try {
-        const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-        rawSubtitles = transcript.map(t => ({
-            start: t.offset,
-            dur: t.duration,
-            text: t.text
-        }));
-    } catch (err1) {
-        // সিস্টেম ২: সিস্টেম ১ ফেইল করলে ম্যানুয়াল ট্রাই করবে
-        try {
-            rawSubtitles = await getSubtitles({ videoID: videoId, lang: 'en' });
-        } catch (err2) {
-            return res.status(500).json({ error: "ভিডিওটিতে কোনো সাবটাইটেল নেই বা ইউটিউব সার্ভার ব্লক করেছে।" });
-        }
-    }
-
-    // প্রথম ৫০টি লাইন নিচ্ছি
-    const limit = Math.min(rawSubtitles.length, 50);
-    let processedData = [];
-    let englishLines = [];
-
-    for (let i = 0; i < limit; i++) {
-        let enText = rawSubtitles[i].text.replace(/\n/g, ' ').trim();
-        enText = enText.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-        englishLines.push(enText || "...");
-    }
-
-    // গুগলকে ট্রান্সলেট করতে পাঠানো
-    let combinedText = englishLines.join('\n');
-    let translatedText = "";
-    let translationFailed = false;
     
-    try {
-        let translated = await translate(combinedText, { to: 'bn' });
-        translatedText = translated.text;
-    } catch (tError) {
-        translationFailed = true; // গুগল ব্লক করলে এই অপশন চালু হবে
+    if (!videoId) {
+        return res.status(400).json({ error: 'videoId is required' });
     }
 
-    let bengaliLines = translationFailed ? [] : translatedText.split('\n');
-
-    // ডাটা সাজানো
-    for (let i = 0; i < limit; i++) {
-        let startSec = parseFloat(rawSubtitles[i].start);
-        let durSec = parseFloat(rawSubtitles[i].dur);
-        
-        // মিলি-সেকেন্ড ফিক্স
-        if (startSec > 1000) { startSec /= 1000; durSec /= 1000; }
-
-        processedData.push({
-            start: startSec,
-            end: startSec + durSec,
-            en: englishLines[i],
-            bn: translationFailed ? "(গুগল ট্রান্সলেটর সাময়িক ব্লক করেছে)" : (bengaliLines[i] ? bengaliLines[i].trim() : "")
+    try {
+        const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        // ইউটিউব পেজ ফেচ করা
+        const response = await fetch(ytUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
         });
-    }
+        const html = await response.text();
 
-    res.json(processedData);
-});
+        // HTML থেকে হিডেন ক্যাপশন ট্র্যাক বের করা
+        const regex = /"captionTracks":\[(.*?)\]/;
+        const match = regex.exec(html);
+        if (!match) {
+            return res.status(404).json({ error: 'No captions found for this video' });
+        }
 
-// শব্দের অর্থ বের করার API
-app.get('/api/translate', async (req, res) => {
-    const text = req.query.text;
-    try {
-        let translated = await translate(text, { to: 'bn' });
-        res.json({ word: text, meaning: translated.text });
+        const tracks = JSON.parse(`[${match[1]}]`);
+        
+        // ইংরেজি সাবটাইটেল খোঁজা
+        const enTrack = tracks.find(t => t.languageCode === 'en' || t.vssId.includes('.en')) || tracks[0];
+
+        if (!enTrack) {
+            return res.status(404).json({ error: 'No valid track found' });
+        }
+
+        // XML ফরম্যাটে সাবটাইটেল ডাউনলোড
+        const xmlResponse = await fetch(enTrack.baseUrl);
+        const xmlText = await xmlResponse.text();
+
+        const transcript = [];
+        // XML পার্স করার জন্য Regex
+        const textRegex = /<text start="([^"]*)"(?: dur="([^"]*)")?[^>]*>(.*?)<\/text>/g;
+        let textMatch;
+
+        while ((textMatch = textRegex.exec(xmlText)) !== null) {
+            const start = parseFloat(textMatch[1]);
+            const dur = textMatch[2] ? parseFloat(textMatch[2]) : 2.0;
+            let text = textMatch[3];
+            
+            // HTML Entity ডিকোড করা
+            text = text.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\n/g, ' ').replace(/<[^>]*>?/gm, '').trim();
+            
+            if (text) {
+                transcript.push({
+                    start,
+                    end: start + dur,
+                    en: text
+                });
+            }
+        }
+
+        // সফল হলে JSON রেসপন্স পাঠানো
+        res.json(transcript);
+
     } catch (error) {
-        res.status(500).json({ error: "Meaning not found" });
+        console.error('Error fetching transcript:', error);
+        res.status(500).json({ error: 'Failed to fetch transcript from YouTube' });
     }
 });
 
+// সার্ভার চালু করা
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server is running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`yt-subtitle-server is running on port ${PORT}`);
+});
