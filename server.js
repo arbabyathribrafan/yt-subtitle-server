@@ -1,13 +1,13 @@
 const express = require('express');
 const cors = require('cors');
-const { YoutubeTranscript } = require('youtube-transcript');
+const { getSubtitles } = require('youtube-captions-scraper');
 
 const app = express();
 
-// সব ওয়েবসাইটের জন্য CORS পারমিশন দেওয়া হলো
+// সব ওয়েবসাইটের জন্য CORS পারমিশন
 app.use(cors());
 
-// সাবটাইটেল বের করার API Endpoint
+// সাবটাইটেল বের করার API
 app.get('/transcript', async (req, res) => {
     const videoId = req.query.videoId;
     
@@ -18,48 +18,32 @@ app.get('/transcript', async (req, res) => {
     try {
         console.log(`Fetching transcript for video: ${videoId}`);
         
-        // youtube-transcript প্যাকেজ ব্যবহার করে সাবটাইটেল ফেচ করা
-        const transcriptList = await YoutubeTranscript.fetchTranscript(videoId);
-        
-        if (!transcriptList || transcriptList.length === 0) {
-            return res.status(404).json({ error: 'No captions found' });
-        }
-
-        // ফ্রন্টএন্ড এর কাঙ্ক্ষিত ফরম্যাটে ডেটা সাজানো
-        const formattedTranscript = transcriptList.map(item => {
-            // offset এবং duration মিলিসেকেন্ডে থাকে, তাই সেকেন্ডে কনভার্ট করা হলো
-            const startSec = item.offset / 1000;
-            const durSec = item.duration / 1000;
-            
-            // স্পেশাল ক্যারেক্টার ক্লিন করা
-            let text = item.text
-                .replace(/&amp;/g, '&')
-                .replace(/&#39;/g, "'")
-                .replace(/&quot;/g, '"')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/\n/g, ' ')
-                .replace(/<[^>]*>?/gm, '')
-                .trim();
-
-            return {
-                start: startSec,
-                end: startSec + durSec,
-                en: text
-            };
+        // youtube-captions-scraper ব্যবহার করে ইংরেজি সাবটাইটেল আনা
+        const captions = await getSubtitles({
+            videoID: videoId,
+            lang: 'en' // ইংরেজি সাবটাইটেল খুঁজবে
         });
 
-        // সফল হলে JSON রেসপন্স পাঠানো
+        // ফ্রন্টএন্ড এর জন্য ডেটা ফরম্যাট করা
+        const formattedTranscript = captions.map(item => {
+            return {
+                start: parseFloat(item.start),
+                end: parseFloat(item.start) + parseFloat(item.dur),
+                // [Music] বা [Applause] এর মত টেক্সট রিমুভ করা এবং ক্লিন করা
+                en: item.text.replace(/\[.*?\]/g, '').replace(/\n/g, ' ').trim()
+            };
+        }).filter(item => item.en.length > 0); // ফাকা লাইনগুলো বাদ দেওয়া
+
         res.json(formattedTranscript);
 
     } catch (error) {
         console.error('Error fetching transcript:', error.message);
-        res.status(500).json({ error: 'Failed to fetch transcript from YouTube. It might not have captions.' });
+        res.status(500).json({ error: 'Failed to fetch transcript. Video might not have English subtitles.' });
     }
 });
 
 // সার্ভার চালু করা
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`yt-subtitle-server is running on port ${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 });
