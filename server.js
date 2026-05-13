@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { getSubtitles } = require('youtube-captions-scraper');
+const { YoutubeTranscript } = require('youtube-transcript');
 const translate = require('google-translate-api-x');
 
 const app = express();
@@ -15,24 +15,22 @@ app.get('/api/transcript', async (req, res) => {
     }
 
     try {
-        // ইউটিউব থেকে ইংরেজি সাবটাইটেল আনা
-        const subtitles = await getSubtitles({
-            videoID: videoId,
-            lang: 'en' 
-        });
+        // নতুন লাইব্রেরি: অটো-জেনারেটেড এবং ম্যানুয়াল সব সাবটাইটেল ধরবে
+        const transcript = await YoutubeTranscript.fetchTranscript(videoId);
 
         // প্রথম ৫০টি লাইন নিচ্ছি
-        const limit = Math.min(subtitles.length, 50);
+        const limit = Math.min(transcript.length, 50);
         let processedData = [];
         let englishLines = [];
 
-        // ইংরেজি লাইনগুলো একসাথে করা
         for (let i = 0; i < limit; i++) {
-            let enText = subtitles[i].text.replace(/\n/g, ' ').trim();
+            let enText = transcript[i].text.replace(/\n/g, ' ').trim();
+            // HTML স্পেশাল ক্যারেক্টার ফিক্স করা
+            enText = enText.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
             englishLines.push(enText || "...");
         }
 
-        // গুগলকে মাত্র ১টি রিকোয়েস্ট পাঠিয়ে সব বাংলা করা (Rate limit থেকে বাঁচতে)
+        // গুগলকে মাত্র ১টি রিকোয়েস্ট পাঠিয়ে সব বাংলা করা
         let combinedText = englishLines.join('\n');
         let translatedText = "";
         
@@ -40,17 +38,26 @@ app.get('/api/transcript', async (req, res) => {
             let translated = await translate(combinedText, { to: 'bn' });
             translatedText = translated.text;
         } catch (tError) {
-            console.log("Translation Blocked by Google, using English fallback.");
-            translatedText = combinedText; // ট্রান্সলেট ফেইল করলে শুধু ইংরেজি দেখাবে
+            console.log("Translation Error:", tError.message);
+            translatedText = combinedText; // ফেইল করলে শুধু ইংরেজি দেখাবে
         }
 
         let bengaliLines = translatedText.split('\n');
 
         // ইংরেজি ও বাংলা লাইন একসাথে সাজানো
         for (let i = 0; i < limit; i++) {
+            let startSec = parseFloat(transcript[i].offset);
+            let durSec = parseFloat(transcript[i].duration);
+            
+            // যদি মিলি-সেকেন্ডে আসে তবে সেকেন্ডে কনভার্ট করা
+            if (startSec > 10000) {
+                startSec = startSec / 1000;
+                durSec = durSec / 1000;
+            }
+
             processedData.push({
-                start: parseFloat(subtitles[i].start),
-                end: parseFloat(subtitles[i].start) + parseFloat(subtitles[i].dur),
+                start: startSec,
+                end: startSec + durSec,
                 en: englishLines[i],
                 bn: bengaliLines[i] ? bengaliLines[i].trim() : "অনুবাদ করা যায়নি"
             });
@@ -59,7 +66,8 @@ app.get('/api/transcript', async (req, res) => {
         res.json(processedData);
 
     } catch (error) {
-        res.status(500).json({ error: "এই ভিডিওতে কোনো ইংরেজি সাবটাইটেল নেই বা অটো-জেনারেটেড।" });
+        console.error("Subtitle Fetch Error:", error.message);
+        res.status(500).json({ error: "সাবটাইটেল টানা সম্ভব হয়নি! ভিডিওটিতে কোনো সাবটাইটেল নেই।" });
     }
 });
 
