@@ -4,149 +4,102 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// VTT টাইম (00:00:04.500) কে সেকেন্ডে কনভার্ট করার ফাংশন
-function timeToSeconds(timeStr) {
-    if (!timeStr) return 0;
-    const parts = timeStr.split(':');
-    let sec = 0;
-    if (parts.length === 3) {
-        sec = parseInt(parts[0], 10) * 3600 + parseInt(parts[1], 10) * 60 + parseFloat(parts[2]);
-    } else if (parts.length === 2) {
-        sec = parseInt(parts[0], 10) * 60 + parseFloat(parts[1]);
-    }
-    return sec;
-}
-
 app.get('/transcript', async (req, res) => {
     const videoId = req.query.videoId;
     if (!videoId) return res.status(400).json({ error: 'videoId is required' });
 
     try {
         console.log(`\n--- Fetching Subtitles for: ${videoId} ---`);
-        
-        let healthyServers = [];
-        
-        // ১. ইন্টারনেট থেকে এই মুহূর্তের সবচেয়ে সুস্থ (Healthy) ১০টি সার্ভারের লাইভ লিস্ট আনা
-        try {
-            console.log(`[1] Fetching live server list...`);
-            const invReq = await fetch('https://api.invidious.io/instances.json?sort_by=health');
-            const invData = await invReq.json();
-            
-            // ফিল্টার করে সেরা ১০টি সার্ভার আলাদা করা
-            healthyServers = invData
-                .filter(inst => inst[1].type === 'https' && inst[1].api === true)
-                .map(inst => inst[1].uri)
-                .slice(0, 10);
-                
-        } catch (e) {
-            console.log(`[!] Failed to get live list. Using backup servers...`);
-            // যদি লাইভ লিস্ট আনতে না পারে, তবে ব্যাকআপ লিস্ট ব্যবহার করবে
-            healthyServers = [
-                'https://inv.tux.pizza', 'https://invidious.nerdvpn.de',
-                'https://invidious.jing.rocks', 'https://vid.puffyan.us',
-                'https://yewtu.be', 'https://invidious.lunar.icu'
-            ];
+        console.log(`Disguising server as a Samsung Smart TV...`);
+
+        // ইউটিউবকে বোকা বানানোর জন্য Smart TV এর স্পেশাল পেলোড
+        const payload = {
+            context: {
+                client: {
+                    clientName: "TVHTML5", // Smart TV Client
+                    clientVersion: "7.20240509.00.00",
+                    clientScreen: "WATCH",
+                    hl: "en",
+                    gl: "US"
+                }
+            },
+            videoId: videoId
+        };
+
+        // সরাসরি ইউটিউবের ইন্টারনাল API তে রিকোয়েস্ট (কোনো প্রক্সি ছাড়া)
+        const response = await fetch('https://www.youtube.com/youtubei/v1/player', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                // Samsung Smart TV এর User-Agent
+                'User-Agent': 'Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 NativeTVAds Safari/538.1'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            throw new Error(`YouTube TV API Blocked Request: HTTP ${response.status}`);
         }
 
-        console.log(`[2] Found ${healthyServers.length} active servers. Testing them rapidly...`);
+        const data = await response.json();
 
-        let lastError = "All servers failed.";
+        // সাবটাইটেল ট্র্যাকগুলো বের করা
+        const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
 
-        // ২. এই ১০টি সার্ভারে একটার পর একটা চেষ্টা করবে
-        for (const server of healthyServers) {
-            try {
-                console.log(` -> Testing: ${server}`);
-                const apiUrl = `${server}/api/v1/videos/${videoId}`;
+        if (!tracks || tracks.length === 0) {
+            throw new Error("No English captions found for this video.");
+        }
 
-                // সার্ভার স্লো থাকলে ৫ সেকেন্ড পর নিজে থেকেই সেটি বাতিল করে পরেরটিতে যাবে (যাতে কোড হ্যাং না হয়)
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 5000);
+        // ইংরেজি সাবটাইটেল ট্র্যাকটি খুঁজে বের করা
+        let targetTrack = tracks.find(t => t.languageCode === 'en' && !t.kind); // ম্যানুয়াল
+        if (!targetTrack) targetTrack = tracks.find(t => t.languageCode.includes('en')); // অটো-জেনারেটেড
+        if (!targetTrack) targetTrack = tracks[0]; // না পেলে প্রথমটি
 
-                const response = await fetch(apiUrl, { signal: controller.signal });
-                clearTimeout(timeoutId); // সফল হলে টাইমার বন্ধ
+        console.log(`Subtitle track found! Downloading XML...`);
 
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        // সাবটাইটেলের আসল XML ফাইলটি ডাউনলোড করা
+        const xmlResponse = await fetch(targetTrack.baseUrl);
+        if (!xmlResponse.ok) throw new Error("Failed to download subtitle XML file.");
+        
+        const xmlText = await xmlResponse.text();
 
-                const data = await response.json();
+        // XML থেকে ফ্রন্টএন্ড এর জন্য JSON তৈরি করা
+        const transcript = [];
+        const textRegex = /<text start="([^"]*)"(?: dur="([^"]*)")?[^>]*>(.*?)<\/text>/g;
+        let textMatch;
 
-                if (!data.captions || data.captions.length === 0) {
-                    throw new Error('No captions on this server.');
-                }
+        while ((textMatch = textRegex.exec(xmlText)) !== null) {
+            const start = parseFloat(textMatch[1]);
+            const dur = textMatch[2] ? parseFloat(textMatch[2]) : 2.0;
+            
+            // HTML ট্যাগ এবং স্পেশাল ক্যারেক্টার রিমুভ করা
+            let text = textMatch[3]
+                .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+                .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                .replace(/\n/g, ' ').replace(/<[^>]*>?/gm, '').trim();
 
-                // ইংরেজি সাবটাইটেল খোঁজা
-                let caption = data.captions.find(c => c.languageCode === 'en' && !c.label.toLowerCase().includes('auto'));
-                if (!caption) caption = data.captions.find(c => c.languageCode.includes('en'));
-                if (!caption) caption = data.captions[0];
+            // ASCII কোড (যেমন &#39;) ডিকোড করা
+            text = text.replace(/&#(\d+);/g, (m, dec) => String.fromCharCode(dec));
 
-                const vttUrl = server + caption.url;
-                
-                // সাবটাইটেল ফাইল ডাউনলোডের জন্যও ৫ সেকেন্ড টাইমার
-                const vttController = new AbortController();
-                const vttTimeout = setTimeout(() => vttController.abort(), 5000);
-                const vttResponse = await fetch(vttUrl, { signal: vttController.signal });
-                clearTimeout(vttTimeout);
-                
-                if (!vttResponse.ok) throw new Error('Failed to download VTT file.');
-
-                const vttText = await vttResponse.text();
-
-                // ৩. VTT ফাইল পার্স করা
-                const transcript = [];
-                const lines = vttText.split('\n');
-                let currentStart = 0;
-                let currentEnd = 0;
-                let currentText = [];
-
-                for (let i = 0; i < lines.length; i++) {
-                    const line = lines[i].trim();
-                    if (line.includes('-->')) {
-                        const timeParts = line.split(/\s+-->\s+/);
-                        currentStart = timeToSeconds(timeParts[0]);
-                        currentEnd = timeToSeconds(timeParts[1].split(/\s+/)[0]);
-                        currentText = [];
-                    } else if (line === '' && currentText.length > 0) {
-                        let text = currentText.join(' ').replace(/<[^>]+>/g, '').trim();
-                        text = text.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-                        text = text.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim(); // সাউন্ড ব্র্যাকেট রিমুভ
-                        if (text) transcript.push({ start: currentStart, end: currentEnd, en: text });
-                        currentText = [];
-                    } else if (line !== 'WEBVTT' && line !== '' && !line.startsWith('Kind:') && !line.startsWith('Language:')) {
-                        currentText.push(line);
-                    }
-                }
-
-                // শেষ লাইনটি যুক্ত করা
-                if (currentText.length > 0) {
-                    let text = currentText.join(' ').replace(/<[^>]+>/g, '').trim();
-                    text = text.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-                    text = text.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim();
-                    if (text) transcript.push({ start: currentStart, end: currentEnd, en: text });
-                }
-
-                if (transcript.length > 0) {
-                    console.log(`[✔] Success! Downloaded from ${server}`);
-                    return res.json(transcript); // সফল হলে ফ্রন্টএন্ডে পাঠিয়ে লুপ ব্রেক করবে
-                } else {
-                    throw new Error('Parsed transcript is empty.');
-                }
-
-            } catch (err) {
-                console.log(`   [✖] Failed: ${err.message}`);
-                lastError = err.message;
-                // ফেইল করলে লুপ ঘুরে ২য় সার্ভারে চলে যাবে
+            if (text) {
+                transcript.push({ start, end: start + dur, en: text });
             }
         }
 
-        // ১০টি সার্ভারই ফেইল করলে
-        throw new Error(`All 10 live servers failed or timed out. Last Error: ${lastError}`);
+        if (transcript.length === 0) {
+            throw new Error("Transcript file is empty.");
+        }
+
+        console.log(`[✔] Success! Sent ${transcript.length} lines to frontend.`);
+        res.json(transcript);
 
     } catch (error) {
-        console.error(`[FATAL ERROR] ${error.message}`);
+        console.error(`[X] Error: ${error.message}`);
         res.status(500).json({ error: error.message });
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Self-Healing Server running on port ${PORT}`);
+    console.log(`Smart TV Bypass Server running on port ${PORT}`);
 });
