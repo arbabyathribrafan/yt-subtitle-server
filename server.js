@@ -21,103 +21,132 @@ app.get('/transcript', async (req, res) => {
     const videoId = req.query.videoId;
     if (!videoId) return res.status(400).json({ error: 'videoId is required' });
 
-    // ৫টি সুপার ফাস্ট ও রিলায়েবল Invidious API সার্ভার (IP Block এড়াতে)
-    const instances = [
-        'https://inv.tux.pizza',
-        'https://invidious.nerdvpn.de',
-        'https://invidious.jing.rocks',
-        'https://invidious.fdn.fr',
-        'https://vid.puffyan.us'
-    ];
-
-    let lastError = "All API instances failed";
-
-    // একটি ফেইল করলে স্বয়ংক্রিয়ভাবে পরেরটিতে রিকোয়েস্ট পাঠাবে
-    for (const instance of instances) {
+    try {
+        console.log(`\n--- Fetching Subtitles for: ${videoId} ---`);
+        
+        let healthyServers = [];
+        
+        // ১. ইন্টারনেট থেকে এই মুহূর্তের সবচেয়ে সুস্থ (Healthy) ১০টি সার্ভারের লাইভ লিস্ট আনা
         try {
-            console.log(`Fetching from Invidious API: ${instance}`);
-            const apiUrl = `${instance}/api/v1/videos/${videoId}`;
-
-            const response = await fetch(apiUrl);
-            if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
-
-            const data = await response.json();
-
-            // সাবটাইটেল আছে কি না চেক করা
-            if (!data.captions || data.captions.length === 0) {
-                throw new Error('No captions available for this video on this server.');
-            }
-
-            // ইংরেজি সাবটাইটেল খোঁজা (ম্যানুয়ালকে অগ্রাধিকার দেওয়া হয়েছে)
-            let caption = data.captions.find(c => c.languageCode === 'en' && !c.label.toLowerCase().includes('auto'));
-            if (!caption) caption = data.captions.find(c => c.languageCode.includes('en'));
-            if (!caption) caption = data.captions[0];
-
-            // সাবটাইটেল (VTT ফরম্যাট) ফাইল ডাউনলোড করা
-            const vttUrl = instance + caption.url;
-            const vttResponse = await fetch(vttUrl);
-            if (!vttResponse.ok) throw new Error('Failed to download subtitle file.');
-
-            const vttText = await vttResponse.text();
-
-            // VTT ফাইল পার্স করে আপনার ফ্রন্টএন্ড এর জন্য JSON বানানো
-            const transcript = [];
-            const lines = vttText.split('\n');
-            let currentStart = 0;
-            let currentEnd = 0;
-            let currentText = [];
-
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].trim();
+            console.log(`[1] Fetching live server list...`);
+            const invReq = await fetch('https://api.invidious.io/instances.json?sort_by=health');
+            const invData = await invReq.json();
+            
+            // ফিল্টার করে সেরা ১০টি সার্ভার আলাদা করা
+            healthyServers = invData
+                .filter(inst => inst[1].type === 'https' && inst[1].api === true)
+                .map(inst => inst[1].uri)
+                .slice(0, 10);
                 
-                if (line.includes('-->')) {
-                    const timeParts = line.split(/\s+-->\s+/);
-                    currentStart = timeToSeconds(timeParts[0]);
-                    // টাইমলাইনের পর বাড়তি টেক্সট (যেমন align:start) থাকলে সেটা বাদ দেওয়া
-                    currentEnd = timeToSeconds(timeParts[1].split(/\s+/)[0]); 
-                    currentText = [];
-                } 
-                else if (line === '' && currentText.length > 0) {
+        } catch (e) {
+            console.log(`[!] Failed to get live list. Using backup servers...`);
+            // যদি লাইভ লিস্ট আনতে না পারে, তবে ব্যাকআপ লিস্ট ব্যবহার করবে
+            healthyServers = [
+                'https://inv.tux.pizza', 'https://invidious.nerdvpn.de',
+                'https://invidious.jing.rocks', 'https://vid.puffyan.us',
+                'https://yewtu.be', 'https://invidious.lunar.icu'
+            ];
+        }
+
+        console.log(`[2] Found ${healthyServers.length} active servers. Testing them rapidly...`);
+
+        let lastError = "All servers failed.";
+
+        // ২. এই ১০টি সার্ভারে একটার পর একটা চেষ্টা করবে
+        for (const server of healthyServers) {
+            try {
+                console.log(` -> Testing: ${server}`);
+                const apiUrl = `${server}/api/v1/videos/${videoId}`;
+
+                // সার্ভার স্লো থাকলে ৫ সেকেন্ড পর নিজে থেকেই সেটি বাতিল করে পরেরটিতে যাবে (যাতে কোড হ্যাং না হয়)
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+                const response = await fetch(apiUrl, { signal: controller.signal });
+                clearTimeout(timeoutId); // সফল হলে টাইমার বন্ধ
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+
+                if (!data.captions || data.captions.length === 0) {
+                    throw new Error('No captions on this server.');
+                }
+
+                // ইংরেজি সাবটাইটেল খোঁজা
+                let caption = data.captions.find(c => c.languageCode === 'en' && !c.label.toLowerCase().includes('auto'));
+                if (!caption) caption = data.captions.find(c => c.languageCode.includes('en'));
+                if (!caption) caption = data.captions[0];
+
+                const vttUrl = server + caption.url;
+                
+                // সাবটাইটেল ফাইল ডাউনলোডের জন্যও ৫ সেকেন্ড টাইমার
+                const vttController = new AbortController();
+                const vttTimeout = setTimeout(() => vttController.abort(), 5000);
+                const vttResponse = await fetch(vttUrl, { signal: vttController.signal });
+                clearTimeout(vttTimeout);
+                
+                if (!vttResponse.ok) throw new Error('Failed to download VTT file.');
+
+                const vttText = await vttResponse.text();
+
+                // ৩. VTT ফাইল পার্স করা
+                const transcript = [];
+                const lines = vttText.split('\n');
+                let currentStart = 0;
+                let currentEnd = 0;
+                let currentText = [];
+
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i].trim();
+                    if (line.includes('-->')) {
+                        const timeParts = line.split(/\s+-->\s+/);
+                        currentStart = timeToSeconds(timeParts[0]);
+                        currentEnd = timeToSeconds(timeParts[1].split(/\s+/)[0]);
+                        currentText = [];
+                    } else if (line === '' && currentText.length > 0) {
+                        let text = currentText.join(' ').replace(/<[^>]+>/g, '').trim();
+                        text = text.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+                        text = text.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim(); // সাউন্ড ব্র্যাকেট রিমুভ
+                        if (text) transcript.push({ start: currentStart, end: currentEnd, en: text });
+                        currentText = [];
+                    } else if (line !== 'WEBVTT' && line !== '' && !line.startsWith('Kind:') && !line.startsWith('Language:')) {
+                        currentText.push(line);
+                    }
+                }
+
+                // শেষ লাইনটি যুক্ত করা
+                if (currentText.length > 0) {
                     let text = currentText.join(' ').replace(/<[^>]+>/g, '').trim();
                     text = text.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-                    
-                    // [Music] বা (Applause) এর মত সাউন্ড ইফেক্ট রিমুভ করা
                     text = text.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim();
-
                     if (text) transcript.push({ start: currentStart, end: currentEnd, en: text });
-                    currentText = [];
-                } 
-                else if (line !== 'WEBVTT' && line !== '' && !line.startsWith('Kind:') && !line.startsWith('Language:')) {
-                    currentText.push(line);
                 }
-            }
 
-            // একদম শেষের লাইনটি ধরার জন্য
-            if (currentText.length > 0) {
-                let text = currentText.join(' ').replace(/<[^>]+>/g, '').trim();
-                text = text.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-                text = text.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim();
-                if (text) transcript.push({ start: currentStart, end: currentEnd, en: text });
-            }
+                if (transcript.length > 0) {
+                    console.log(`[✔] Success! Downloaded from ${server}`);
+                    return res.json(transcript); // সফল হলে ফ্রন্টএন্ডে পাঠিয়ে লুপ ব্রেক করবে
+                } else {
+                    throw new Error('Parsed transcript is empty.');
+                }
 
-            if (transcript.length > 0) {
-                console.log(`Success! Subtitles fetched perfectly.`);
-                return res.json(transcript); // সফল হলে ডেটা পাঠিয়ে লুপ ব্রেক করবে
-            } else {
-                throw new Error('Parsed transcript is empty.');
+            } catch (err) {
+                console.log(`   [✖] Failed: ${err.message}`);
+                lastError = err.message;
+                // ফেইল করলে লুপ ঘুরে ২য় সার্ভারে চলে যাবে
             }
-
-        } catch (err) {
-            console.log(`Failed on ${instance}: ${err.message}`);
-            lastError = err.message;
         }
-    }
 
-    // সব সার্ভার ফেইল করলে এরর মেসেজ
-    res.status(500).json({ error: `System Failed. Reason: ${lastError}` });
+        // ১০টি সার্ভারই ফেইল করলে
+        throw new Error(`All 10 live servers failed or timed out. Last Error: ${lastError}`);
+
+    } catch (error) {
+        console.error(`[FATAL ERROR] ${error.message}`);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Invidious API Server running on port ${PORT}`);
+    console.log(`Self-Healing Server running on port ${PORT}`);
 });
